@@ -1,0 +1,505 @@
+/*
+   CITS2002 Project 1 2015
+   Name(s):		Adrian Cooper, Juan Lu
+   Student number(s):	20786307, 21691401
+   Date:		18/09/2015
+*/
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdbool.h>
+#include <math.h>
+
+#define EARTH_RADIUS_IN_METRES          6372797
+
+double degrees_to_radians(double degrees)
+{
+    return (degrees * M_PI / 180.0);
+}
+
+double radians_to_degrees(double radians)
+{
+    return (radians * 180.0 / M_PI);
+}
+
+bool valid_location(double latitude, double longitude)
+{
+    return (latitude  >= -90.0  && latitude  <= 90.0   &&
+            longitude >= -180.0 && longitude <= 180.0);
+}
+
+
+double haversine(double lat1, double lon1, double lat2, double lon2)
+{
+    double deltalat = (lat2 - lat1) / 2.0;
+    double deltalon = (lon2 - lon1) / 2.0;
+
+    double sin1     = sin( degrees_to_radians(deltalat) );
+
+    double cos1     = cos( degrees_to_radians(lat1) );
+    double cos2     = cos( degrees_to_radians(lat2) );
+
+    double sin2     = sin( degrees_to_radians(deltalon) );
+
+    double x        = sin1*sin1 + cos1*cos2 * sin2*sin2;
+
+    double metres   = 2 * EARTH_RADIUS_IN_METRES * asin( sqrt(x) );
+
+    return metres;
+}
+#define MAX_STOPS 200
+#define MAX_SIZE 100
+#define MAX_COLUMNS 20
+#define MAX_ROUTES 2000
+#define DIMENSIONS_OF_COORDINATES 2
+#define SECONDS_IN_AN_HOUR 3600
+#define SECONDS_IN_TEN_HOURS 36000
+#define SECONDS_IN_A_MINUTE 60
+#define SECONDS_IN_TEN_MINUTES 600
+#define ARBITRARILY_LARGE_NUMBER 9999999 //Exactly what it says on the tin
+
+int stopsfound[MAX_STOPS]; // Global array that stores a set of stops found within 1k of a location. Other functions copy this array piece by piece into other arrays
+int stopsfoundstart[MAX_STOPS];	//Array containing the stop IDs of every stop within 1k of home
+int stopsfoundstartroutes[MAX_STOPS][MAX_ROUTES][3];	
+int stopsfoundend[MAX_STOPS];	//Array containing the stop IDs of every stop within 1k of destination
+int routesfound[MAX_STOPS][MAX_ROUTES][5]; //Element 0 is trip ID of a given route, element 1 is the stop you get on, element 2 is the stop you get off, element 3 is the time you get on , element 4 is the time you get off
+char directory[MAX_STOPS];
+char workingline[MAX_COLUMNS][MAX_SIZE]; // A line currently being read from a file, split into different elements, with the split being at the location of commas in the file. workingline[0] for example represents all characters before the first comma, workingline[1] represents all characters after the first comma and before the second, et cetera
+int prunedroutes[MAX_STOPS][MAX_ROUTES][5]; //Contains copied elements from routesfound where the route left after arriving at the stop but before 1 hour after leaving home
+int startstopdist[MAX_STOPS];	//Distance between home and the stop you get on, with different stops represented by the parameter
+int endstopdist[MAX_STOPS];	//Distance between the stop you get off and the destination
+int stopdist[MAX_STOPS];	//Distance between a stop and a location, to be copied into startstopdist or endstopdist
+double latd;	//Latitude of destination
+double lond;	//Longitude of destination
+double lath;	//Latitude of home
+double lonh;	//Longitude of home
+int starttime[MAX_STOPS][MAX_ROUTES]; // The time a given public transport trip starts, represented in seconds after midnight
+int endtime[MAX_STOPS][MAX_ROUTES];   // The time a given public transport trip ends, represented in seconds after midnight
+char currentclocktime[5];	//A 5 character representation of the environmental variable LEAVEHOME, represented as HH:MM
+int current_time;		//An integer representation of the environmental variable LEAVEHOME, represented as seconds after midnight
+char clock[5]; // Array for temporary storage of clock times, for use in functions. Again, dirty, but it works.
+char startstopname[MAX_SIZE];	// Array containing the names of the stops found near home
+char endstopname[MAX_SIZE];	// Array containing the names of the stops found near destination
+int shortestroute[8]; 	//Element 0 is the trip ID, element 1 is the stop you get on, element 2 is the stop you get off, element 3 is the time you get on, element 4 is the time you get off, element 5 is the time you arrive at your destination, element 6 is the distance from home to first stop, element 7 is the distance from last stop to destination
+
+
+
+
+int clock_to_seconds()
+{
+	int seconds = SECONDS_IN_TEN_HOURS * (int)(clock[0]-'0') + SECONDS_IN_AN_HOUR * (int)(clock[1]-'0') + SECONDS_IN_TEN_MINUTES * (int)(clock[3]-'0') + SECONDS_IN_A_MINUTE * (int)(clock[4]-'0'); //Element 0 of clock represents tens of hours, element 1 represents ones of hours, element 3 represents tens of minutes, element 4 represents ones of minutes. Converts all these into seconds and adds them up, to get a representation of seconds after midnight.
+	return seconds;
+}
+
+void seconds_to_clock(int seconds) {	//Converts an integer representation of seconds after midnight into a 24h clock representation
+	if(seconds%60 != 0) { seconds = seconds/60 + 1; } //Round any leftover seconds up to the nearest minute
+	else { 	
+		seconds = seconds/60;	//Otherwise ignore the seconds column
+	}		
+	clock[4] = (char)(seconds%10) + '0';	//Set 5th char to the ones of minutes
+	seconds = seconds/10;
+	clock[3] = (char)(seconds%6) + '0';	//Set 4th char to the tens of minutes
+	clock[2] = ':';				//Set 3rd char to a colon
+	seconds = seconds/6;
+	clock[1] = (char)(seconds%10) + '0';	//Set 2nd char to ones of hours
+	seconds = seconds/10;
+	clock[0] = (char)seconds + '0';		//Set 1st char to tens of hours
+}
+
+
+
+void pruneroutes() {		//Removes all routes starting before getting to the stop, and an hour after leaving home
+	for (int i = 0; i < 5; i++) {
+		clock[i] = currentclocktime[i];	//Sets clock to currentclocktime, to be used by clock_to_seconds
+	}
+	current_time = clock_to_seconds();	//Sets current time to an integer representation of seconds after midnight
+	for (int i = 0; i < MAX_STOPS; i++) {
+		//printf("Yes\n");
+		for (int j = 0, k = 0; routesfound[i][j][0] != 0; j++) {
+			//printf("Yes3\n");
+			if (current_time + startstopdist[i] < routesfound[i][j][3] && routesfound[i][j][3] < current_time + SECONDS_IN_AN_HOUR) {	//Only write to prunedroutes if the route leaves before getting to the stop or over an hour after
+				prunedroutes[i][k][0] = routesfound[i][j][0];
+				prunedroutes[i][k][1] = routesfound[i][j][1];
+				prunedroutes[i][k][2] = routesfound[i][j][2];
+				prunedroutes[i][k][3] = routesfound[i][j][3];
+				prunedroutes[i][k][4] = routesfound[i][j][4];
+				//printf("%i %i\n",routesfound[i][j][0],  prunedroutes[i][k][0]);
+				
+				k++;	// Only move onto the next set of second elements in the prunedroutes array if this one was actually written to.
+			}
+		}
+	}
+}
+
+
+void calcshortroute() {
+	shortestroute[5] = ARBITRARILY_LARGE_NUMBER;	//The function only inserts a route if it is shorter than the current best route. Leaving the time taken at 0 would mean no route would ever be inserted. Setting it to an arbitrarily large number avoids this.
+	for (int i = 0; i < MAX_SIZE ; i++) {	//Loop over all i values of prunedroutes
+		for (int j = 0; prunedroutes[i][j][0] != 0 && j < MAX_ROUTES; j++) { //Loop over all j values of prunedroutes that contain a route, and stop if it would go out of bounds
+			//printf("%i %i %i\n", prunedroutes[i][j][4],  endstopdist[i], shortestroute[5]);
+			if ((prunedroutes[i][j][4] + endstopdist[i]) < shortestroute[5]) {   //Only overwrite shortestroute if the current prunedroutes is shorter than the current shortestroute
+				//printf("Yes2\n");
+				shortestroute[0] = prunedroutes[i][j][0]; //}
+				shortestroute[1] = prunedroutes[i][j][1]; //}
+				shortestroute[2] = prunedroutes[i][j][2]; //}Copy prunedroutes details into shortestroute
+				shortestroute[3] = prunedroutes[i][j][3]; //}
+				shortestroute[4] = prunedroutes[i][j][4]; //}
+				shortestroute[5] = prunedroutes[i][j][4] + endstopdist[i]; //The time you arrive at your destination is the time you get off plus the distance walked in metres
+				shortestroute[6] = startstopdist[i];	//Distance between home and the stop you get on, for use in determining the distance walked
+				shortestroute[7] = endstopdist[i];	//Distance between the stop you get off and the destination, for use in determining the distance walked
+			}
+		}
+	}
+	
+}
+
+void separatecols(char* line) {		//Modifies a global array because we can't return an array. Dirty, but it works
+	for (int i = 0; i < MAX_COLUMNS; i++) {
+		for (int j = 0; j < MAX_SIZE; j++) {
+			workingline[i][j] = '\0';	//Clear the line so we don't have stuff left over from previous uses
+		}
+	}
+	for (int k = 0, col = 0, colpos = 0; k < BUFSIZ; k++) {
+		if ((int)line[k] == (int)',') {
+		col++;		//Move to next column
+		colpos = 0;	//Start at position 0 in next column
+	} else {
+		workingline[col][colpos] = line[k]; 	//Write the character read from the file into the current position in the current column
+		colpos++;				//Move to the next position in the current column
+	}
+		
+	
+}
+}
+
+
+void findstops(float lat, float lon)	//Find all stops within 1km of a given location, fill stopsfound with said stops, and fill stopdist with the distances of the corresponding stops to the location
+{
+	//Inialize the stopsfound and stopcoords arrays to 0
+  for (int i = 0 ; i < MAX_STOPS; i++)
+  {
+      	stopsfound[i] = 0;
+	stopdist[i] = 0;
+  }
+
+  //Open file and read file
+	FILE *stops;
+	char line[BUFSIZ];
+	char directoryfindstops[MAX_SIZE];
+	sprintf(directoryfindstops, "%s/stops.txt", directory);
+	stops = fopen(directoryfindstops, "r"); 
+	if (stops == NULL) {
+		printf("Stops.txt not found in given directory.\n");
+		exit(EXIT_FAILURE);
+	}
+	int linecount = 0;//countline
+	int i = 0;
+
+  
+	while (fgets(line, sizeof line, stops) != NULL )//Read line by line until it reaches the end of file
+  	{
+		linecount++; 				//}
+		if (linecount == 1) { continue; } 	//} Skip reading the first line
+		int stopid;
+
+		separatecols(line);	//Break the line being read into columns
+		stopid = atoi(workingline[2]);	//Element 3 of the workingline being read is the stopid of that line
+		double ilatnum = atof(workingline[6]);	//Element 6 of the workingline being read is the latitude of the stop represented on that line
+		//printf("%f\n",ilatnum);
+		double ilonnum = atof(workingline[7]);	//Element 7 of the workingline being read is the longitude of the stop represented on that line
+		if (haversine(ilatnum, ilonnum, lat, lon) < 1000)	//Only if the distance between the given location and the stop being checked is less than 1000 metres...
+    		{	
+			stopsfound[i] = stopid;				//... copy the stopid of the stop being checked into stopsfound
+			stopdist[i] = haversine(ilatnum, ilonnum, lat, lon);	//... copy the distance between the stop being checked and the location into stopdist
+			i++;	//Only move to the next element in the stopsfound and stopdist array if the current one is written to
+
+		}
+	}
+	fclose(stops);	//Close the file being read as we are no longer using it
+}
+
+void startstops(double lat, double lon) {
+	findstops(lat, lon);		// Fill stopsfound with stops near home and stopdist with distances to home from said stops
+	for (int i = 0 ; i < MAX_STOPS; i++) {
+		stopsfoundstart[i] = stopsfound[i]; 	//Copy stops near home into stopsfoundstart
+		startstopdist[i] = stopdist[i];		//Copy distances to home from said stops into startstopdist
+	}
+} 
+
+void endstops (double lat, double lon) {
+	findstops(lat, lon);		//Fill stopsfound with stops near the destination and stopdist with distances to the destination from said stops
+	for (int i = 0; i < MAX_STOPS && stopsfound[i] != 0; i++) {
+		stopsfoundend[i] = stopsfound[i];  	//Copy stops near the destination into stopsfoundend
+		endstopdist[i] = stopdist[i];		//Copy distances to the destination from said stops into endstopdist
+	}
+}
+void findroute () 
+{
+
+	FILE *stptime;
+	char lines[BUFSIZ];
+	char directoryfindroutes[MAX_SIZE];
+	sprintf(directoryfindroutes, "%s/stop_times.txt",directory);
+	stptime = fopen(directoryfindroutes, "r");
+	if (stptime == NULL) {	//Exit with a failure if the text file not found
+		printf("Stop_times.txt not found in given directory.\n");
+		exit(EXIT_FAILURE);
+	}
+	int linecount1 = 0;//countline
+	int tripid = 0; //}Initialise to 0
+	int stopid = 0; //}
+	while (fgets(lines, sizeof lines, stptime) != NULL )//Read line by line until it reaches the end of the file
+  	{
+		linecount1++; 				//}
+		if (linecount1 == 1) { continue; } 	//} Skip reading the first line
+		separatecols(lines);	//Break the line being read into columns
+		stopid = atoi(workingline[3]);	//Element 3 of the line being read is the stopid of that line
+		tripid = atoi(workingline[0]);	//Element 0 of the line being read is the tripid of that line
+		for (int i = 0; i < 5; i++) {
+			clock[i] = workingline[2][i];	//Element 2 of the line being read is an HH:MM:SS representation of the time the service departs. This copies HH:MM into clock
+		}
+		int departure_time = clock_to_seconds(); //The time the bus departs the first stop in seconds after midnight
+		for(int i = 0, j = 0 ; i < MAX_STOPS ; i = i + 1)	//For each element i...
+		{
+			if(stopid == stopsfoundstart[i])		//... check if the stopid of the current line is equal to the i-th stop found within 1km of home, and if so copy the details into stopsfoundstartroutes via the lines below
+			{
+				while (stopsfoundstartroutes[i][j][0] != 0) { j++; }	//Move j such that no filled stopsfoundstartroutes are overwritten
+				stopsfoundstartroutes[i][j][0] = tripid;	//}
+				stopsfoundstartroutes[i][j][1] = departure_time;//}Fill the j-th element of stopsfoundstart[i] with details of tripid, departure time, and stopid.
+				stopsfoundstartroutes[i][j][2] = stopid;	//}In this way, allstopsfoundstart[i][j] for any given i correspond to the stop in stopsfoundstart[i]
+					
+			 
+			}
+		}  
+  	}
+	linecount1 = 0;
+	fclose(stptime); //Close the file being read as we are no lnoger using it
+	FILE *stptime1;
+	stptime1 = fopen(directoryfindroutes, "r");
+	while (fgets(lines, sizeof lines, stptime1) != NULL )	//Read line by line until it reaches the end of the file
+  	{
+		linecount1++; 				//}
+		if (linecount1 == 1) { continue; } 	//} Skip reading the first line
+		separatecols(lines);	//Break the line being read into columnds
+		stopid = atoi(workingline[3]);	//The stopid of the current line is element 3 of the workingline
+		tripid = atoi(workingline[0]);	//The tripid of the current line is element 0 of the workingline
+		for (int i = 0; i < 5; i++) {
+			clock[i] = workingline[1][i]; // Element 1 of the working line is an HH:MM:SS representation of the time the service arrives at the destination stop. This copies the HH:MM into clock
+		}
+		int arrival_time = clock_to_seconds();	//This works on clock to set arrival_time, representing the time the service arrives at its destination in seconds past midnight
+		for(int i = 0 ; i < MAX_STOPS ; i = i + 1)	//Loops over all i to check...
+		{
+			if(stopid == stopsfoundend[i])	//...if the stopid of the line being looked is equal to the i-th element of stopsfoundend. Commenting this line made me find the program-breaking bug. ABOUT TIME. //Nope, it still doesn't work //IT WORKS
+			{	
+				for (int j = 0; j < MAX_SIZE ; j++) { // Loop over all stopids in stopsfoundstartroutes to find routes with a matching tripid
+					for (int k = 0, l = 0; k < MAX_ROUTES && stopsfoundstartroutes[j][k][0] != 0; k++) {	//Break out of the current loop when all elements of stopsfoundstartroutes[j] are checked.
+						while(routesfound[j][l][0]!= 0)	
+						{ l++; }		//Increment l such that the following function never overwrites an already filled routesfound[j][l]
+						
+						if(tripid == stopsfoundstartroutes[j][k][0] && stopsfoundstartroutes[j][k][1] < arrival_time) //Check that the starting stop route matches the trip ID, -AND- that it arrives at your destination stop AFTER it leaves the stop you get on
+						{
+							routesfound[j][l][0] = tripid;				//TripID of the current trip
+							routesfound[j][l][1] = stopsfoundstartroutes[j][k][2];	//ID of the stop near home
+							routesfound[j][l][2] = stopid;				//ID of the destination stop
+							routesfound[j][l][3] = stopsfoundstartroutes[j][k][1];	//Departure time of the trip from the stop near home
+							routesfound[j][l][4] = arrival_time;			//Arrival time of the destination stop
+						}
+						
+					
+									
+					}
+					
+				
+				}
+
+			}
+		}  
+  	}
+	fclose(stptime1); //Close the file as we are no longer using it
+}
+
+int homedestdist() {
+	return haversine(lath, lonh, latd, lond); //Returns the straight line distance between home and destination, in case they are less than 1km apart
+}
+
+
+void stop_name()	//Find the stop name of the starting stop and the end stop
+{
+	FILE *stops;
+	char line[BUFSIZ];
+	char directoryfindstops[MAX_SIZE];
+	sprintf(directoryfindstops, "%s/stops.txt", directory);
+	stops = fopen(directoryfindstops, "r"); 
+	if (stops == NULL) { //Exits with a failure if the stops.txt file is not in the given directory
+		printf("Stops.txt not found in given directory.\n");
+		exit(EXIT_FAILURE);
+	}
+	int linecount = 0;//countline
+
+
+	while (fgets(line, sizeof line, stops) != NULL )//Read each line in the file one by one
+  {
+		linecount++; 				//}
+		if (linecount == 1) { continue; } 	//} Skip reading the first line
+		int stopid;
+
+		separatecols(line);	//Break the current line into columns to be worked on
+		stopid = atoi(workingline[2]);	//Copy the stop ID from element 2 of workingline into stopid
+		if (stopid == shortestroute[1])	//If the stopid of the current line is equal to the stopid of the starting stop in shortestroute...
+    		{	
+			strcpy(startstopname,workingline[4]); //...Copy the stop name from element 4 of workingline into startstopname
+			
+		}
+	}
+	fclose(stops); //Close the file as we have finished using it
+	sprintf(directoryfindstops, "%s/stops.txt", directory);
+	stops = fopen(directoryfindstops, "r"); 
+	if (stops == NULL) {
+		printf("Stops.txt not found in the given directory.\n");
+		exit(EXIT_FAILURE);
+	}
+	linecount = 0;//countline
+
+  //read from file line by line
+	while (fgets(line, sizeof line, stops) != NULL ) //Break out when it reaches the end of the file
+  {
+		linecount++; 				//}
+		if (linecount == 1) { continue; } 	//} Skip reading the first line
+		int stopid;
+
+		separatecols(line);	//Break the current line into columns to be worked on
+		stopid = atoi(workingline[2]);	//Copy the stop ID from element 2 of workingline into stopid
+		
+		if (stopid == shortestroute[2]) // If the stopid of the current line is equal to the stopid of the end stop in shortestroute...
+    		{	
+			strcpy(endstopname,workingline[4]); ///...Copy the stop name from element 4 of workingline into endstopname
+			
+		}
+	}
+	fclose(stops); //Close the file being read as we are no lnoger using it
+}
+
+char routename[MAX_SIZE];
+
+void route_name()
+{
+	
+	FILE *trips;
+	char line[BUFSIZ];
+	char directoryfindtrips[MAX_SIZE];
+	sprintf(directoryfindtrips, "%s/trips.txt", directory);
+	trips = fopen(directoryfindtrips, "r");  //check 'em
+	if (trips == NULL) {	//Exit with a failure if the trips.txt is not in the given directory
+		printf("Trips.txt not found in given directory.\n");
+		exit(EXIT_FAILURE);
+	}
+	int linecount = 0;//countline
+	int routeidfound;
+
+  //read from file line by line
+	while (fgets(line, sizeof line, trips) != NULL )//Break out of the loop when it reaches the end of the file
+  {
+		linecount++; 				//}
+		if (linecount == 1) { continue; } 	//} Skip reading the first line
+		
+		
+		separatecols(line);
+		int tripid = atoi(workingline[2]);
+		int routeid = atoi(workingline[0]);
+		if (tripid == shortestroute[0])
+		
+    		{	
+			//printf("No\n");
+			routeidfound = routeid;
+						
+		//	printf("%i\n", stopid);
+		}
+	}
+	fclose(trips); //Close the file being read as we are no lnoger using it
+	FILE *routes;
+	//char line[BUFSIZ];
+	char directoryfindroutes[MAX_SIZE];
+	sprintf(directoryfindroutes, "%s/routes.txt", directory);
+	routes = fopen(directoryfindroutes, "r"); 
+	if (routes == NULL) {
+		printf("Routes.txt not found in given directory.\n");
+		exit(EXIT_FAILURE);
+	}
+	linecount = 0;//countline
+
+  //read from file line by line
+	while (fgets(line, sizeof line, routes) != NULL )//if it read only one line or not
+  {
+		linecount++; 
+		
+		if (linecount == 1) { continue; } // Skip reading the first line
+		separatecols(line);
+		char route_short_name[MAX_SIZE];
+		strcpy(route_short_name,workingline[2]);
+		char route_long_name[MAX_SIZE]; 
+		strcpy(route_long_name,workingline[3]);	
+		int routeid = atoi(workingline[0]);
+		if (routeid == routeidfound)
+    		{	
+			sprintf(routename, "%s%s", route_short_name,route_long_name);
+		}
+	}
+	fclose(routes); //Close the file being read as we are no lnoger using it
+
+	
+
+}
+
+int main(int argc, char* argv[]) //Test input -32.1479054960 116.0201957650 -32.1479054960 116.0201957650
+{
+	const char *name = "LEAVEHOME";
+	char *value;
+	value = getenv(name);
+	for (int i = 0; i<5; i++) {
+		currentclocktime[i] = value[i+4];	//Remove the day, and copy the time into currentclocktime
+	}
+	setbuf(stdout, NULL);
+   if (argc != 6)
+   {	//Exit with a failure if invalid number of arguments
+      printf("Invalid number of arguments\n");
+      exit(EXIT_FAILURE);
+   }
+	strcpy(directory, argv[1]);
+   lath = atof(argv[2]);
+   lonh = atof(argv[3]);
+   latd = atof(argv[4]);
+   lond = atof(argv[5]);
+   if (!valid_location(lath,lonh)||!valid_location(latd,lond))
+   {	//Exit with a failure if location coordinates are impossible
+     printf("Invalid location coordinates");
+     exit(EXIT_FAILURE);
+   }
+   startstops(lath,lonh);	//Find all stops within 1km of home and put them in a global array to be used
+   endstops(latd,lond);		//Find all stops within 1km of destination and put them in a global array to be used
+
+ findroute();			//Find all routes that go from any of the starting stops to any of the end stops
+	pruneroutes();		//Find all routes that leave after arriving at the stop and before 1 hour after leaving home
+	calcshortroute();	//Find the shortest route of the pruned routes
+	route_name();		//Find the name of the service used in the shortest route
+	stop_name();		//Find the names of the stops used in the shortest route
+	seconds_to_clock(current_time);	//Set the clock to the time you leave home
+	int a = homedestdist();// We couldn't come up with a better variable name
+	if (a < 1000 && a < shortestroute[5]) {	//If the shortest route is simply walking...
+		printf("%s  walk %im to destination\n",clock,shortestroute[6] ); 	//}
+		seconds_to_clock(current_time+a);					//}Print out that you walk there.
+		printf("%s  arrive\n", clock);						//}
+		exit(EXIT_SUCCESS); //SUCCESS!!!! Exit so it doesn't print out the stuff below
+	}
+		if (shortestroute[5] == ARBITRARILY_LARGE_NUMBER) {	//If there is no valid routes found...
+		printf("%s  not possible\n", clock);			//... print out that the journey is impossible
+		exit(EXIT_SUCCESS);					//And exit so it doesn't print out the stuff below
+	}
+	printf("%s  walk %im to stop %i %s\n", clock, shortestroute[6], shortestroute[1], startstopname);	//}
+	seconds_to_clock(shortestroute[3]);									//}
+	printf("%s  catch %s to stop %i %s\n", clock, routename,shortestroute[2], endstopname);			//}
+	seconds_to_clock(shortestroute[4]);									//}Print out directions
+	printf("%s  walk %im to destination\n", clock, shortestroute[7]);					//}
+	seconds_to_clock(shortestroute[5]);									//}
+	printf("%s  arrive\n",clock);										//}
+ return 0;}
